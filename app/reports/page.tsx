@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { db } from "@/lib/db";
+import { auth } from "@/lib/auth";
 import {
   Card,
   CardHeader,
@@ -6,62 +8,123 @@ import {
   SeverityBadge,
   StatusBadge,
 } from "@/components/ui";
-import { documents, findings } from "@/lib/data";
-import { IconDownload, IconChevronRight } from "@/components/icons";
+import {
+  ExportPdfButton,
+  FindingStateButtons,
+  SignOffButton,
+} from "@/components/reports/ReportControls";
+import { IconChevronRight } from "@/components/icons";
+import type { Status } from "@/lib/data";
 
-const categories = [
-  {
-    name: "Professional liability",
-    score: "B−",
-    note: "Strong limits and consent terms, undermined by the sedation exclusion and unlisted associates.",
-    counts: { critical: 2, important: 1, strengths: 3 },
-  },
-  {
-    name: "Property & BOP",
-    score: "B",
-    note: "Solid base form; equipment-breakdown sublimit is the outlier for a CAD/CAM practice.",
-    counts: { critical: 0, important: 1, strengths: 1 },
-  },
-  {
-    name: "Cyber",
-    score: "C+",
-    note: "Coverage exists but limits lag the practice's PHI footprint; declarations incomplete.",
-    counts: { critical: 0, important: 1, strengths: 0 },
-  },
-  {
-    name: "Workers' comp",
-    score: "—",
-    note: "Cannot be graded until the missing classification and payroll schedule is received.",
-    counts: { critical: 0, important: 0, strengths: 0 },
-  },
+export const dynamic = "force-dynamic";
+
+const CATEGORY_BY_PREFIX: [RegExp, string][] = [
+  [/^PL/, "Professional liability"],
+  [/^BOP/, "Property & BOP"],
+  [/^CY/, "Cyber"],
+  [/^WC/, "Workers' compensation"],
 ];
 
-const agentReview = [
-  { step: "Field extraction verified", who: "M. Okafor", state: "done" as const },
-  { step: "Findings reviewed & edited", who: "M. Okafor", state: "done" as const },
-  { step: "Licensed agent sign-off", who: "D. Reyes, CIC", state: "current" as const },
-  { step: "Report released to client", who: "—", state: "todo" as const },
-];
+function categoryOf(ruleCode: string | null, source: string): string {
+  if (ruleCode) {
+    for (const [re, cat] of CATEGORY_BY_PREFIX) if (re.test(ruleCode)) return cat;
+  }
+  if (/cyber/i.test(source)) return "Cyber";
+  if (/workers/i.test(source)) return "Workers' compensation";
+  if (/business owners|bop/i.test(source)) return "Property & BOP";
+  return "Professional liability";
+}
 
-export default function ReportsPage() {
-  const critical = findings.filter((f) => f.severity === "Critical");
-  const important = findings.filter((f) => f.severity === "Important");
-  const clarifications = findings.filter((f) => f.severity === "Clarification");
-  const strengths = findings.filter((f) => f.severity === "Strength");
+function gradeFor(critical: number, important: number, strengths: number, hasData: boolean) {
+  if (!hasData) return "—";
+  const score = 10 - critical * 3 - important * 1.5 + Math.min(strengths, 3) * 0.5;
+  if (score >= 10) return "A";
+  if (score >= 8.5) return "A−";
+  if (score >= 7.5) return "B+";
+  if (score >= 6.5) return "B";
+  if (score >= 5.5) return "B−";
+  if (score >= 4.5) return "C+";
+  if (score >= 3.5) return "C";
+  return "C−";
+}
+
+export default async function ReportsPage() {
+  const session = await auth();
+  const role = (session?.user as { role?: string } | undefined)?.role;
+
+  const practice = await db.practice.findFirst({
+    orderBy: { updatedAt: "desc" },
+    where: { analyses: { some: {} }, documents: { some: {} } },
+    include: {
+      documents: { orderBy: { createdAt: "asc" } },
+      analyses: { include: { findings: { orderBy: { order: "asc" } } } },
+    },
+  });
+  const analysis = practice?.analyses[0];
+  if (!practice || !analysis) {
+    return (
+      <p className="p-10 text-center text-sm text-ink-faint">
+        No analyses yet. Seed the database with <code>npm run db:seed</code>.
+      </p>
+    );
+  }
+
+  const approved = analysis.findings.filter((f) => f.state === "APPROVED");
+  const proposed = analysis.findings.filter((f) => f.state === "PROPOSED");
+  const critical = approved.filter((f) => f.severity === "Critical");
+  const important = approved.filter((f) => f.severity === "Important");
+  const clarifications = approved.filter((f) => f.severity === "Clarification");
+  const strengths = approved.filter((f) => f.severity === "Strength");
+
+  const fieldStats = await db.extractedField.aggregate({
+    where: { document: { practiceId: practice.id } },
+    _count: { _all: true },
+  });
+  const reviewedCount = await db.extractedField.count({
+    where: { document: { practiceId: practice.id }, decision: { not: null } },
+  });
+  const progress =
+    fieldStats._count._all === 0
+      ? 0
+      : Math.round((reviewedCount / fieldStats._count._all) * 100);
+
+  const categories = ["Professional liability", "Property & BOP", "Cyber", "Workers' compensation"].map(
+    (cat) => {
+      const inCat = approved.filter((f) => categoryOf(f.ruleCode, f.source) === cat);
+      const c = inCat.filter((f) => f.severity === "Critical").length;
+      const i = inCat.filter((f) => f.severity === "Important").length;
+      const s = inCat.filter((f) => f.severity === "Strength").length;
+      const hasData =
+        inCat.length > 0 &&
+        !(cat === "Workers' compensation" &&
+          practice.documents.some(
+            (d) => /workers/i.test(d.name) && d.completeness !== "Complete"
+          ));
+      return { name: cat, counts: { critical: c, important: i, strengths: s }, grade: gradeFor(c, i, s, hasData) };
+    }
+  );
+
+  const agentSteps = [
+    { step: "Field extraction verified", who: analysis.analystName, state: progress > 50 ? "done" : "current" },
+    { step: "Findings reviewed & edited", who: analysis.analystName, state: proposed.length === 0 ? "done" : "current" },
+    { step: "Licensed agent sign-off", who: analysis.signedOffBy ?? "Dana Reyes, CIC", state: analysis.signedOffAt ? "done" : "current" },
+    { step: "Report released to client", who: "—", state: analysis.signedOffAt ? "current" : "todo" },
+  ] as const;
 
   return (
     <div className="space-y-6 p-6">
       <div className="flex items-end justify-between">
         <div>
           <p className="text-2xs font-medium uppercase tracking-[0.12em] text-ink-faint">
-            Gap-analysis report · In agent review
+            Gap-analysis report ·{" "}
+            {analysis.signedOffAt ? "Signed off" : "In review"}
           </p>
           <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">
-            Lakeview Family Dental
+            {practice.name}
           </h2>
           <p className="mt-1 text-xs text-ink-faint">
-            Naperville & Aurora, IL · 4 dentists · Policy period reviewed:
-            2025–2026
+            {practice.location} · {practice.dentists} dentists · Analyst:{" "}
+            {analysis.analystName}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -71,89 +134,78 @@ export default function ReportsPage() {
           >
             Preview executive report <IconChevronRight className="h-3.5 w-3.5" />
           </Link>
-          <button
-            type="button"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand-700 px-3.5 text-[13px] font-medium text-white hover:bg-brand-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
-          >
-            <IconDownload className="h-4 w-4" /> Export PDF
-          </button>
+          <ExportPdfButton analysisId={analysis.id} enabled={!!analysis.signedOffAt} />
         </div>
       </div>
 
-      {/* Summary tiles */}
       <div className="grid grid-cols-4 gap-4">
-        <Card className="border-l-2 border-l-red-500 px-5 py-4">
-          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
-            Critical findings
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">
-            {critical.length}
-          </p>
-          <p className="mt-0.5 text-2xs text-ink-faint">
-            Immediate action recommended
-          </p>
-        </Card>
-        <Card className="border-l-2 border-l-amber-500 px-5 py-4">
-          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
-            Important findings
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">
-            {important.length}
-          </p>
-          <p className="mt-0.5 text-2xs text-ink-faint">
-            Address at or before renewal
-          </p>
-        </Card>
-        <Card className="border-l-2 border-l-blue-500 px-5 py-4">
-          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
-            Clarifications needed
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">
-            {clarifications.length}
-          </p>
-          <p className="mt-0.5 text-2xs text-ink-faint">
-            Awaiting client or carrier response
-          </p>
-        </Card>
-        <Card className="border-l-2 border-l-emerald-500 px-5 py-4">
-          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
-            Coverage strengths
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">
-            {strengths.length}
-          </p>
-          <p className="mt-0.5 text-2xs text-ink-faint">
-            Worth preserving at renewal
-          </p>
-        </Card>
+        {[
+          { label: "Critical findings", n: critical.length, cls: "border-l-red-500", sub: "Immediate action recommended" },
+          { label: "Important findings", n: important.length, cls: "border-l-amber-500", sub: "Address at or before renewal" },
+          { label: "Clarifications needed", n: clarifications.length, cls: "border-l-blue-500", sub: "Awaiting client or carrier response" },
+          { label: "Coverage strengths", n: strengths.length, cls: "border-l-emerald-500", sub: "Worth preserving at renewal" },
+        ].map((t) => (
+          <Card key={t.label} className={`border-l-2 px-5 py-4 ${t.cls}`}>
+            <p className="text-2xs font-medium uppercase tracking-[0.08em] text-ink-faint">
+              {t.label}
+            </p>
+            <p className="mt-1.5 text-2xl font-semibold tabular-nums text-ink">{t.n}</p>
+            <p className="mt-0.5 text-2xs text-ink-faint">{t.sub}</p>
+          </Card>
+        ))}
       </div>
 
       <div className="grid grid-cols-3 gap-6">
-        {/* Findings list */}
         <div className="col-span-2 space-y-6">
+          {proposed.length > 0 && (
+            <Card className="border-brand-600/30">
+              <CardHeader
+                title={`Proposed findings awaiting review (${proposed.length})`}
+                subtitle="Proposed by extraction and rules — approve to include in the report, dismiss to discard"
+              />
+              <ul className="divide-y divide-line">
+                {proposed.map((f) => (
+                  <li key={f.id} className="px-5 py-4">
+                    <div className="flex items-center gap-2">
+                      <SeverityBadge severity={f.severity as "Critical" | "Important" | "Clarification" | "Strength"} />
+                      <StatusBadge status={f.status as Status} />
+                      {f.ruleCode && (
+                        <span className="ml-auto text-2xs font-medium tabular-nums text-brand-700">
+                          Rule {f.ruleCode}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-2 text-[13px] font-semibold text-ink">{f.title}</p>
+                    <p className="mt-1 text-xs leading-relaxed text-ink-soft">{f.detail}</p>
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <p className="text-2xs text-ink-faint">{f.source}</p>
+                      <FindingStateButtons findingId={f.id} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
           <Card>
             <CardHeader
-              title="Findings"
+              title="Findings in report"
               subtitle="Every finding cites the policy language it is based on"
             />
             <ul className="divide-y divide-line">
-              {findings.map((f) => (
+              {approved.map((f) => (
                 <li key={f.id} className="px-5 py-4">
                   <div className="flex items-center gap-2">
-                    <SeverityBadge severity={f.severity} />
-                    <StatusBadge status={f.status} />
-                    {f.rule && (
+                    <SeverityBadge severity={f.severity as "Critical" | "Important" | "Clarification" | "Strength"} />
+                    <StatusBadge status={f.status as Status} />
+                    {f.ruleCode && (
                       <span className="ml-auto text-2xs font-medium tabular-nums text-brand-700">
-                        Rule {f.rule}
+                        Rule {f.ruleCode}
                       </span>
                     )}
                   </div>
-                  <p className="mt-2 text-[13px] font-semibold text-ink">
-                    {f.title}
-                  </p>
-                  <p className="mt-1 text-xs leading-relaxed text-ink-soft">
-                    {f.detail}
-                  </p>
+                  <p className="mt-2 text-[13px] font-semibold text-ink">{f.title}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-ink-soft">{f.detail}</p>
                   <p className="mt-1.5 text-2xs text-ink-faint">{f.source}</p>
                 </li>
               ))}
@@ -161,7 +213,6 @@ export default function ReportsPage() {
           </Card>
         </div>
 
-        {/* Right rail */}
         <div className="space-y-6">
           <Card>
             <CardHeader
@@ -174,24 +225,22 @@ export default function ReportsPage() {
                   <div className="flex items-center justify-between">
                     <p className="text-[13px] font-medium text-ink">{c.name}</p>
                     <span className="rounded-md bg-paper px-2 py-0.5 font-serif text-sm font-semibold text-ink ring-1 ring-inset ring-line">
-                      {c.score}
+                      {c.grade}
                     </span>
                   </div>
-                  <p className="mt-1 text-2xs leading-relaxed text-ink-faint">
-                    {c.note}
-                  </p>
                   <p className="mt-1.5 flex gap-2 text-2xs font-medium">
                     {c.counts.critical > 0 && (
                       <span className="text-red-700">{c.counts.critical} critical</span>
                     )}
                     {c.counts.important > 0 && (
-                      <span className="text-amber-700">
-                        {c.counts.important} important
-                      </span>
+                      <span className="text-amber-700">{c.counts.important} important</span>
                     )}
                     {c.counts.strengths > 0 && (
-                      <span className="text-emerald-700">
-                        {c.counts.strengths} strengths
+                      <span className="text-emerald-700">{c.counts.strengths} strengths</span>
+                    )}
+                    {c.grade === "—" && (
+                      <span className="text-ink-faint">
+                        Not gradable until missing documents arrive
                       </span>
                     )}
                   </p>
@@ -203,11 +252,8 @@ export default function ReportsPage() {
           <Card>
             <CardHeader title="Policies & documents reviewed" />
             <ul className="divide-y divide-line">
-              {documents.map((d) => (
-                <li
-                  key={d.id}
-                  className="flex items-center justify-between px-5 py-2.5"
-                >
+              {practice.documents.map((d) => (
+                <li key={d.id} className="flex items-center justify-between px-5 py-2.5">
                   <div>
                     <p className="text-xs font-medium text-ink">{d.name}</p>
                     <p className="text-2xs text-ink-faint">{d.carrier}</p>
@@ -232,26 +278,33 @@ export default function ReportsPage() {
             <CardHeader title="Analysis progress" />
             <div className="px-5 py-4">
               <div className="flex items-baseline justify-between">
-                <p className="text-xs text-ink-soft">Overall</p>
-                <p className="text-xs font-semibold tabular-nums text-ink">68%</p>
+                <p className="text-xs text-ink-soft">Field review</p>
+                <p className="text-xs font-semibold tabular-nums text-ink">{progress}%</p>
               </div>
-              <ProgressBar value={68} label="Analysis progress" className="mt-1.5" />
+              <ProgressBar value={progress} label="Analysis progress" className="mt-1.5" />
               <p className="mt-2 text-2xs text-ink-faint">
-                56 of 78 fields reviewed · 2 documents outstanding
+                {reviewedCount} of {fieldStats._count._all} extracted fields reviewed ·{" "}
+                {proposed.length} findings awaiting review
               </p>
             </div>
           </Card>
 
           <Card>
-            <CardHeader title="Agent review status" />
+            <CardHeader
+              title="Agent review status"
+              action={
+                <SignOffButton
+                  analysisId={analysis.id}
+                  signedOff={!!analysis.signedOffAt}
+                  canSignOff={role === "AGENT" || role === "ADMIN"}
+                />
+              }
+            />
             <ol className="px-5 py-4">
-              {agentReview.map((s, i) => (
+              {agentSteps.map((s, i) => (
                 <li key={s.step} className="relative flex gap-3 pb-4 last:pb-0">
-                  {i < agentReview.length - 1 && (
-                    <span
-                      className="absolute left-[7px] top-5 h-full w-px bg-line"
-                      aria-hidden="true"
-                    />
+                  {i < agentSteps.length - 1 && (
+                    <span className="absolute left-[7px] top-5 h-full w-px bg-line" aria-hidden="true" />
                   )}
                   <span
                     aria-hidden="true"
@@ -265,12 +318,7 @@ export default function ReportsPage() {
                   >
                     {s.state === "done" && (
                       <svg viewBox="0 0 10 10" className="h-2 w-2" fill="none">
-                        <path
-                          d="m2 5.2 2 2 4-4.5"
-                          stroke="#fff"
-                          strokeWidth="1.6"
-                          strokeLinecap="round"
-                        />
+                        <path d="m2 5.2 2 2 4-4.5" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" />
                       </svg>
                     )}
                     {s.state === "current" && (
@@ -278,11 +326,7 @@ export default function ReportsPage() {
                     )}
                   </span>
                   <div>
-                    <p
-                      className={`text-xs font-medium ${
-                        s.state === "todo" ? "text-ink-faint" : "text-ink"
-                      }`}
-                    >
+                    <p className={`text-xs font-medium ${s.state === "todo" ? "text-ink-faint" : "text-ink"}`}>
                       {s.step}
                     </p>
                     <p className="text-2xs text-ink-faint">{s.who}</p>
@@ -290,6 +334,17 @@ export default function ReportsPage() {
                 </li>
               ))}
             </ol>
+            {analysis.signedOffAt && (
+              <p className="border-t border-line px-5 py-3 text-2xs text-ink-faint">
+                Signed off by {analysis.signedOffBy} on{" "}
+                {analysis.signedOffAt.toLocaleDateString("en-US", {
+                  month: "long",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+                .
+              </p>
+            )}
           </Card>
         </div>
       </div>

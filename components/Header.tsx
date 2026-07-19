@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
+import { useSession, signOut } from "next-auth/react";
 import { IconSearch, IconBell } from "./icons";
 
 const titles: [string, string][] = [
@@ -15,8 +16,18 @@ const titles: [string, string][] = [
 
 export function Header() {
   const pathname = usePathname();
+  const { data: session } = useSession();
   const title =
     titles.find(([p]) => pathname.startsWith(p))?.[1] ?? "Dashboard";
+  const name = session?.user?.name ?? "—";
+  const roleTitle =
+    (session?.user as { title?: string } | undefined)?.title ?? "";
+  const initials = name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
 
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center gap-4 border-b border-line bg-white/95 px-6 backdrop-blur print:hidden">
@@ -44,17 +55,21 @@ export function Header() {
         <span className="h-6 w-px bg-line" aria-hidden="true" />
         <button
           type="button"
+          onClick={() => signOut({ callbackUrl: "/signin" })}
+          title="Sign out"
           className="flex items-center gap-2 rounded-md p-1 pr-2 hover:bg-paper focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500"
         >
           <span
             aria-hidden="true"
             className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-700 text-2xs font-semibold text-white"
           >
-            MO
+            {initials || "IB"}
           </span>
           <span className="hidden text-left leading-tight lg:block">
-            <span className="block text-xs font-medium text-ink">Maya Okafor</span>
-            <span className="block text-2xs text-ink-faint">Senior Analyst</span>
+            <span className="block text-xs font-medium text-ink">{name}</span>
+            <span className="block text-2xs text-ink-faint">
+              {roleTitle} · Sign out
+            </span>
           </span>
         </button>
       </div>

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
+import { Providers } from "@/components/Providers";
 
 export const metadata: Metadata = {
   title: "Insurance by Dentists — Risk Analysis Platform",
@@ -27,13 +28,15 @@ export default function RootLayout({
         />
       </head>
       <body className="font-sans text-sm">
-        <Sidebar />
-        <div className="pl-60 print:pl-0">
-          <Header />
-          <main className="mx-auto min-h-[calc(100vh-3.5rem)] max-w-[1440px]">
-            {children}
-          </main>
-        </div>
+        <Providers>
+          <Sidebar />
+          <div className="pl-60 print:pl-0">
+            <Header />
+            <main className="mx-auto min-h-[calc(100vh-3.5rem)] max-w-[1440px]">
+              {children}
+            </main>
+          </div>
+        </Providers>
       </body>
     </html>
   );

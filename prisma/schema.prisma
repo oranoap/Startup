@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Roles: ANALYST | AGENT | ADMIN. Statuses/severities are TS string unions
+// (SQLite has no native enums); lib/types.ts is the source of truth.
+
+model User {
+  id           String @id @default(cuid())
+  email        String @unique
+  name         String
+  title        String
+  role         String
+  passwordHash String
+}
+
+model Practice {
+  id        String     @id @default(cuid())
+  name      String
+  location  String
+  specialty String
+  dentists  Int
+  locations Int
+  broker    String
+  // JSON-encoded exposure profile (sedation, records count, equipment value…)
+  profile   String
+  documents Document[]
+  analyses  Analysis[]
+  updatedAt DateTime   @updatedAt
+  createdAt DateTime   @default(now())
+}
+
+model Document {
+  id           String           @id @default(cuid())
+  practiceId   String
+  practice     Practice         @relation(fields: [practiceId], references: [id])
+  name         String
+  type         String
+  carrier      String
+  pages        Int              @default(0)
+  completeness String           @default("Not received")
+  // uploaded | extracting | extracted | failed | none
+  status       String           @default("none")
+  filePath     String?
+  fieldsTotal  Int              @default(0)
+  fields       ExtractedField[]
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+}
+
+model ExtractedField {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  label      String
+  value      String
+  confidence String
+  status     String
+  page       Int
+  // JSON {x,y,w,h} as fractions of page size, top-left origin; null if unknown
+  bbox       String?
+  sourceText String?
+  // approved | edited | rejected | null
+  decision   String?
+  order      Int      @default(0)
+}
+
+model Rule {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  title       String
+  category    String
+  severity    String
+  description String
+  trigger     String
+  enabled     Boolean @default(true)
+  firings     Int     @default(0)
+}
+
+model Analysis {
+  id           String    @id @default(cuid())
+  practiceId   String
+  practice     Practice  @relation(fields: [practiceId], references: [id])
+  stage        String    @default("Extraction")
+  progress     Int       @default(0)
+  analystName  String
+  signedOffAt  DateTime?
+  signedOffBy  String?
+  findings     Finding[]
+  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime  @default(now())
+}
+
+model Finding {
+  id         String   @id @default(cuid())
+  analysisId String
+  analysis   Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  severity   String
+  status     String
+  title      String
+  detail     String
+  source     String
+  ruleCode   String?
+  // PROPOSED | APPROVED | DISMISSED
+  state      String   @default("PROPOSED")
+  order      Int      @default(0)
+  createdAt  DateTime @default(now())
+}
